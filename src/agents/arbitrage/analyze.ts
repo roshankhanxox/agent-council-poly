@@ -1,83 +1,79 @@
 import 'dotenv/config'
 import type { AgentAnalysis } from '../../types.js'
 
-// DiamondClaws x402 endpoint for DeFi/arbitrage risk scoring
-const DIAMONDCLAWS_URL = 'https://api.diamondclaws.xyz/v1/risk'
+// Manifold Markets API — no auth required
+const MANIFOLD_API = 'https://manifold.markets/api/v0'
 
 export async function analyzeArbitrage(
   question: string,
-  x402Fetch: typeof fetch
+  _x402Fetch: typeof fetch
 ): Promise<AgentAnalysis> {
   let rawData: unknown = null
 
   try {
-    const response = await x402Fetch(DIAMONDCLAWS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        query: question,
-        sources: ['polymarket', 'manifold', 'metaculus'],
-        includeArb: true,
-      }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`DiamondClaws returned ${response.status}`)
-    }
-
-    rawData = await response.json()
+    const res = await fetch(
+      `${MANIFOLD_API}/search-markets?term=${encodeURIComponent(question.slice(0, 80))}&limit=5`,
+      { headers: { Accept: 'application/json' } }
+    )
+    if (!res.ok) throw new Error(`Manifold API returned ${res.status}`)
+    rawData = await res.json()
   } catch (err) {
-    console.warn('[arbitrage] DiamondClaws unavailable, using fallback:', err instanceof Error ? err.message : err)
+    console.warn('[arbitrage] Manifold API unavailable:', err instanceof Error ? err.message : err)
     return {
       probability: 0.5,
       confidence: 0.08,
-      reasoning: 'Arbitrage/risk service unavailable; returning neutral estimate.',
+      reasoning: 'Cross-market data unavailable; returning neutral estimate.',
       rawData: null,
     }
   }
 
-  // Expected shape: { riskScore: 0-1, crossMarketPrices: [{source, price}], arbOpportunity: boolean }
-  type DiamondClawsResponse = {
-    riskScore?: number
-    crossMarketPrices?: Array<{ source: string; price: number }>
-    arbOpportunity?: boolean
-    consensusPrice?: number
+  type ManifoldMarket = {
+    question?: string
+    probability?: number
+    pool?: { YES?: number; NO?: number }
+    totalLiquidity?: number
+    volume?: number
+    isResolved?: boolean
   }
 
-  const data = rawData as DiamondClawsResponse
-  let probability = 0.5
-  let confidence = 0.35
+  const markets = (rawData as ManifoldMarket[]) ?? []
+  const active = markets.filter(m => !m.isResolved && typeof m.probability === 'number')
 
-  if (typeof data.consensusPrice === 'number') {
-    probability = data.consensusPrice
-    confidence = 0.6
-  } else if (data.crossMarketPrices && data.crossMarketPrices.length > 0) {
-    // Average cross-market prices
-    const avg = data.crossMarketPrices.reduce((s, p) => s + p.price, 0) / data.crossMarketPrices.length
-    probability = avg
-    confidence = 0.5 + (data.crossMarketPrices.length * 0.05)  // more sources → more confidence
+  if (active.length === 0) {
+    return {
+      probability: 0.5,
+      confidence: 0.1,
+      reasoning: 'No matching Manifold markets found for cross-market comparison.',
+      rawData,
+    }
   }
 
-  // High risk score (close to 1) means the market is risky/uncertain
-  if (typeof data.riskScore === 'number') {
-    confidence = Math.max(0.1, confidence - data.riskScore * 0.2)
+  // Weighted average by volume/liquidity across markets
+  let weightedSum = 0
+  let totalWeight = 0
+
+  for (const m of active) {
+    const weight = (m.totalLiquidity ?? 0) + (m.volume ?? 0) + 1
+    weightedSum += (m.probability ?? 0.5) * weight
+    totalWeight += weight
   }
 
-  probability = Math.max(0.01, Math.min(0.99, probability))
-  confidence = Math.max(0.05, Math.min(0.95, confidence))
+  const probability = Math.max(0.01, Math.min(0.99, weightedSum / totalWeight))
 
-  const arbNote = data.arbOpportunity
-    ? ' Cross-market arbitrage opportunity detected.'
-    : ''
+  // Confidence based on spread across markets (low spread = high consensus)
+  const probs = active.map(m => m.probability ?? 0.5)
+  const spread = Math.max(...probs) - Math.min(...probs)
+  const confidence = Math.max(0.1, Math.min(0.7, 0.6 - spread))
 
-  const sourcesNote = data.crossMarketPrices?.length
-    ? ` Consensus across ${data.crossMarketPrices.length} markets.`
+  // Detect arbitrage: if Manifold prob differs significantly from base (0.5 placeholder)
+  const arbNote = spread > 0.15 && active.length > 1
+    ? ` Spread of ${(spread * 100).toFixed(0)}pp across ${active.length} markets suggests potential arb.`
     : ''
 
   return {
     probability,
     confidence,
-    reasoning: `Risk-adjusted probability: ${(probability * 100).toFixed(0)}%.${sourcesNote}${arbNote}`,
+    reasoning: `Cross-market consensus (${active.length} Manifold markets): ${(probability * 100).toFixed(0)}% YES.${arbNote}`,
     rawData,
   }
 }

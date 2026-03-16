@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@x402/core':
+        specifier: ^2.7.0
+        version: 2.7.0
       '@x402/evm':
         specifier: ^2.7.0
         version: 2.7.0(typescript@5.9.3)

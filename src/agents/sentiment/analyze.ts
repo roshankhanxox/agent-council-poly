@@ -1,77 +1,62 @@
 import 'dotenv/config'
 import type { AgentAnalysis } from '../../types.js'
 
-// Einstein AI x402 endpoint for whale/sentiment tracking
-const EINSTEIN_AI_URL = 'https://api.einstein.ai/v1/sentiment'
+// Alternative.me Crypto Fear & Greed Index — no auth required
+const FNG_URL = 'https://api.alternative.me/fng/?limit=3&format=json'
 
 export async function analyzeSentiment(
   question: string,
-  x402Fetch: typeof fetch
+  _x402Fetch: typeof fetch
 ): Promise<AgentAnalysis> {
   let rawData: unknown = null
 
   try {
-    const response = await x402Fetch(EINSTEIN_AI_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: question, signals: ['whale', 'social', 'onchain'] }),
-    })
-
-    if (!response.ok) {
-      throw new Error(`Einstein AI returned ${response.status}`)
-    }
-
-    rawData = await response.json()
+    const res = await fetch(FNG_URL, { headers: { Accept: 'application/json' } })
+    if (!res.ok) throw new Error(`Fear & Greed API returned ${res.status}`)
+    rawData = await res.json()
   } catch (err) {
-    console.warn('[sentiment] Einstein AI unavailable, using fallback:', err instanceof Error ? err.message : err)
+    console.warn('[sentiment] Fear & Greed API unavailable:', err instanceof Error ? err.message : err)
     return {
       probability: 0.5,
       confidence: 0.1,
-      reasoning: 'Sentiment service unavailable; returning neutral estimate.',
+      reasoning: 'Sentiment data unavailable; returning neutral estimate.',
       rawData: null,
     }
   }
 
-  // Parse Einstein AI response: expected shape { bullish: 0-1, bearish: 0-1, whaleActivity: "high"|"medium"|"low" }
-  type EinsteinResponse = {
-    bullish?: number
-    bearish?: number
-    whaleActivity?: string
-    score?: number
-    sentiment?: string
+  type FngEntry = { value: string; value_classification: string; timestamp: string }
+  type FngResponse = { data?: FngEntry[] }
+
+  const fng = rawData as FngResponse
+  const entries = fng.data ?? []
+
+  if (entries.length === 0) {
+    return { probability: 0.5, confidence: 0.2, reasoning: 'No sentiment data returned.', rawData }
   }
 
-  const data = rawData as EinsteinResponse
-  let probability = 0.5
-  let confidence = 0.4
+  // Average the last 3 days (or fewer)
+  const avgScore = entries.reduce((s, e) => s + parseInt(e.value, 10), 0) / entries.length
+  const latest = entries[0]
+  const classification = latest.value_classification ?? 'Neutral'
 
-  if (typeof data.score === 'number') {
-    // Normalized -1 to 1 → 0 to 1
-    probability = (data.score + 1) / 2
-    confidence = 0.55
-  } else if (typeof data.bullish === 'number' && typeof data.bearish === 'number') {
-    const total = data.bullish + data.bearish
-    probability = total > 0 ? data.bullish / total : 0.5
-    confidence = Math.min(0.7, total)
-  } else if (data.sentiment) {
-    const s = data.sentiment.toLowerCase()
-    if (s === 'bullish' || s === 'positive') { probability = 0.65; confidence = 0.4 }
-    else if (s === 'bearish' || s === 'negative') { probability = 0.35; confidence = 0.4 }
-  }
+  // Fear & Greed: 0 = Extreme Fear, 100 = Extreme Greed
+  // Map to probability: crypto sentiment is loosely correlated with bullish outcomes
+  // but we moderate the signal — sentiment alone is weak evidence
+  const rawProb = avgScore / 100
 
-  // Whale activity boosts confidence
-  if (data.whaleActivity === 'high') confidence = Math.min(0.9, confidence + 0.2)
-  else if (data.whaleActivity === 'low') confidence = Math.max(0.1, confidence - 0.1)
+  // Detect if question is crypto-related for higher confidence
+  const isCrypto = /btc|eth|bitcoin|ethereum|crypto|defi|nft|sol|bnb|usdc|token/i.test(question)
+  const confidence = isCrypto ? 0.45 : 0.25
 
-  probability = Math.max(0.01, Math.min(0.99, probability))
-
-  const signal = probability > 0.55 ? 'bullish' : probability < 0.45 ? 'bearish' : 'neutral'
-  const whaleNote = data.whaleActivity ? ` Whale activity: ${data.whaleActivity}.` : ''
+  // Moderate toward 0.5 for non-crypto questions
+  const probability = isCrypto
+    ? Math.max(0.1, Math.min(0.9, rawProb))
+    : 0.5 + (rawProb - 0.5) * 0.3
 
   return {
     probability,
     confidence,
-    reasoning: `Sentiment signal is ${signal} (score: ${(probability * 100).toFixed(0)}%).${whaleNote}`,
+    reasoning: `Crypto Fear & Greed Index: ${avgScore.toFixed(0)}/100 (${classification}). ${isCrypto ? 'Relevant crypto sentiment signal.' : 'Weak signal for non-crypto market.'}`,
     rawData,
   }
 }

@@ -1,4 +1,7 @@
 import { NextRequest } from 'next/server'
+import { wrapFetchWithPaymentFromConfig } from '@x402/fetch'
+import { ExactEvmScheme, toClientEvmSigner } from '@x402/evm'
+import { privateKeyToAccount } from 'viem/accounts'
 
 const AGENT_CONFIGS = [
   { id: 'news',      url: 'http://localhost:3001/analyze', price: '0.03' },
@@ -6,6 +9,14 @@ const AGENT_CONFIGS = [
   { id: 'sentiment', url: 'http://localhost:3003/analyze', price: '0.02' },
   { id: 'arbitrage', url: 'http://localhost:3004/analyze', price: '0.001' },
 ]
+
+function createX402Fetch(privateKey: string): typeof fetch {
+  const account = privateKeyToAccount(`0x${privateKey.replace(/^0x/, '')}`)
+  const signer = toClientEvmSigner(account)
+  return wrapFetchWithPaymentFromConfig(fetch, {
+    schemes: [{ network: 'eip155:84532', client: new ExactEvmScheme(signer) }],
+  })
+}
 
 function kelly(weightedProb: number, marketPrice: number): number {
   if (marketPrice <= 0 || marketPrice >= 1) return 0
@@ -51,6 +62,11 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: 'question is required' }), { status: 400 })
   }
 
+  const orchestratorKey = process.env.ORCHESTRATOR_PRIVATE_KEY
+  if (!orchestratorKey) {
+    return new Response(JSON.stringify({ error: 'ORCHESTRATOR_PRIVATE_KEY not set' }), { status: 500 })
+  }
+
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({
@@ -61,19 +77,20 @@ export async function POST(req: NextRequest) {
 
       send('start', { question })
 
-      // Call agents sequentially and stream each result as it arrives
-      // (facilitator can't settle concurrent EIP-3009 payments from same wallet)
+      // Create a fresh x402Fetch per agent call (sequential — facilitator can't settle
+      // concurrent EIP-3009 payments from the same wallet)
       const agentResults: AgentResult[] = []
 
       for (const config of AGENT_CONFIGS) {
         try {
-          const res = await fetch(config.url, {
+          const x402Fetch = createX402Fetch(orchestratorKey)
+          const res = await x402Fetch(config.url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ question, marketUrl }),
           })
 
-          // x402 v2 uses base64-encoded PAYMENT-RESPONSE header
+          // x402 v2 puts payment confirmation in base64-encoded PAYMENT-RESPONSE header
           const payHeader = res.headers.get('PAYMENT-RESPONSE') ?? ''
           let txHash = ''
           const paidUSDC = config.price
