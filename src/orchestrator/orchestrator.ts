@@ -30,18 +30,18 @@ async function callAgent(
     throw new Error(`Agent ${config.id} returned ${response.status}: ${await response.text()}`)
   }
 
-  // Extract payment details from x402 response headers
-  const paymentResponseHeader = response.headers.get('X-PAYMENT-RESPONSE') ?? ''
+  // Extract payment details from x402 v2 response header (base64-encoded JSON)
+  const paymentResponseHeader = response.headers.get('PAYMENT-RESPONSE') ?? ''
   let txHash = ''
-  let paidUSDC = config.price
+  const paidUSDC = config.price
 
   if (paymentResponseHeader) {
     try {
-      const paymentData = JSON.parse(paymentResponseHeader) as { txHash?: string; amount?: string }
-      txHash = paymentData.txHash ?? ''
-      paidUSDC = paymentData.amount ?? config.price
+      const decoded = Buffer.from(paymentResponseHeader, 'base64').toString('utf8')
+      const paymentData = JSON.parse(decoded) as { transaction?: string; txHash?: string }
+      txHash = paymentData.transaction ?? paymentData.txHash ?? ''
     } catch {
-      // Header parsing failed, use defaults
+      // ignore
     }
   }
 
@@ -69,29 +69,21 @@ export async function runOrchestrator(request: AnalyzeRequest): Promise<AgentRes
     throw new Error('ORCHESTRATOR_PRIVATE_KEY not set in .env')
   }
 
-  const x402Fetch = createX402Fetch(orchestratorKey)
-
-  // Call all 4 agents in parallel — don't fail if one is down
-  const results = await Promise.allSettled(
-    AGENT_CONFIGS.map(config => callAgent(config, request, x402Fetch))
-  )
-
+  // Run agents sequentially — facilitator can't settle concurrent EIP-3009
+  // payments from the same wallet. Each result streams to the UI as it completes.
   const responses: AgentResponse[] = []
 
-  for (let i = 0; i < results.length; i++) {
-    const result = results[i]
-    const config = AGENT_CONFIGS[i]
-
-    if (result.status === 'fulfilled') {
-      responses.push(result.value)
-    } else {
-      console.warn(`[orchestrator] Agent ${config.id} failed: ${result.reason}`)
-      // Push a degraded response so council still has something to work with
+  for (const config of AGENT_CONFIGS) {
+    try {
+      const result = await callAgent(config, request, createX402Fetch(orchestratorKey))
+      responses.push(result)
+    } catch (err) {
+      console.warn(`[orchestrator] Agent ${config.id} failed: ${err}`)
       responses.push({
         agentId: config.id,
         probability: 0.5,
         confidence: 0.05,
-        reasoning: `Agent offline: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+        reasoning: `Agent offline: ${err instanceof Error ? err.message : String(err)}`,
         rawData: null,
         paidUSDC: '0',
         txHash: '',

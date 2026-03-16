@@ -61,57 +61,42 @@ export async function POST(req: NextRequest) {
 
       send('start', { question })
 
-      // Call all agents in parallel, stream each result as it arrives
+      // Call agents sequentially and stream each result as it arrives
+      // (facilitator can't settle concurrent EIP-3009 payments from same wallet)
       const agentResults: AgentResult[] = []
 
-      await Promise.allSettled(
-        AGENT_CONFIGS.map(async (config) => {
-          try {
-            const res = await fetch(config.url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ question, marketUrl }),
-            })
+      for (const config of AGENT_CONFIGS) {
+        try {
+          const res = await fetch(config.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ question, marketUrl }),
+          })
 
-            const payHeader = res.headers.get('X-PAYMENT-RESPONSE') ?? ''
-            let txHash = ''
-            let paidUSDC = config.price
-            if (payHeader) {
-              try {
-                const p = JSON.parse(payHeader) as { txHash?: string; amount?: string }
-                txHash = p.txHash ?? ''
-                paidUSDC = p.amount ?? config.price
-              } catch { /* ignore */ }
-            }
-
-            if (!res.ok) throw new Error(`HTTP ${res.status}`)
-
-            const data = await res.json() as { probability: number; confidence: number; reasoning: string }
-            const result: AgentResult = {
-              agentId: config.id,
-              probability: data.probability,
-              confidence: data.confidence,
-              reasoning: data.reasoning,
-              paidUSDC,
-              txHash,
-            }
-            agentResults.push(result)
-            send('agent', result)
-          } catch (err) {
-            const result: AgentResult = {
-              agentId: config.id,
-              probability: 0.5,
-              confidence: 0.05,
-              reasoning: `Agent offline: ${err instanceof Error ? err.message : String(err)}`,
-              paidUSDC: '0',
-              txHash: '',
-              error: String(err),
-            }
-            agentResults.push(result)
-            send('agent', result)
+          // x402 v2 uses base64-encoded PAYMENT-RESPONSE header
+          const payHeader = res.headers.get('PAYMENT-RESPONSE') ?? ''
+          let txHash = ''
+          const paidUSDC = config.price
+          if (payHeader) {
+            try {
+              const decoded = Buffer.from(payHeader, 'base64').toString('utf8')
+              const p = JSON.parse(decoded) as { transaction?: string; txHash?: string }
+              txHash = p.transaction ?? p.txHash ?? ''
+            } catch { /* ignore */ }
           }
-        })
-      )
+
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+          const data = await res.json() as { probability: number; confidence: number; reasoning: string }
+          const result: AgentResult = { agentId: config.id, probability: data.probability, confidence: data.confidence, reasoning: data.reasoning, paidUSDC, txHash }
+          agentResults.push(result)
+          send('agent', result)
+        } catch (err) {
+          const result: AgentResult = { agentId: config.id, probability: 0.5, confidence: 0.05, reasoning: `Agent offline: ${err instanceof Error ? err.message : String(err)}`, paidUSDC: '0', txHash: '', error: String(err) }
+          agentResults.push(result)
+          send('agent', result)
+        }
+      }
 
       const verdict = deliberate(agentResults)
       send('verdict', { ...verdict, breakdown: agentResults })

@@ -3,6 +3,7 @@ import express from 'express'
 import { paymentMiddlewareFromConfig } from '@x402/express'
 import { ExactEvmScheme } from '@x402/evm/exact/server'
 import { getAccount } from '../../wallet.js'
+import { makeFacilitator } from '../../facilitator.js'
 import { createX402Fetch } from '../../x402client.js'
 import { analyzeArbitrage } from './analyze.js'
 import type { AnalyzeRequest } from '../../types.js'
@@ -30,7 +31,7 @@ app.use(
         description: 'DeFi/arbitrage risk scoring and cross-market price consensus',
       },
     },
-    undefined,
+    makeFacilitator(),
     [{ network: 'eip155:84532', server: new ExactEvmScheme() }],
   )
 )
