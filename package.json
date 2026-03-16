@@ -1,0 +1,27 @@
+{
+  "name": "prediction-market-council",
+  "version": "1.0.0",
+  "description": "Multi-agent prediction market advisor with x402 machine-to-machine payments",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx scripts/start-all.ts",
+    "ask": "tsx src/orchestrator/index.ts",
+    "register": "tsx scripts/register-agents.ts",
+    "fund": "tsx scripts/fund-wallets.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.36.3",
+    "@x402/evm": "^2.7.0",
+    "@x402/express": "^2.7.0",
+    "@x402/fetch": "^2.7.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "viem": "^2.21.54"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
